@@ -1,118 +1,124 @@
 from datetime import datetime
-import sys
-from PyQt5.QtWidgets import QApplication, QSystemTrayIcon, QMenu, QAction, QMessageBox
+from PyQt5.QtWidgets import QSystemTrayIcon, QMenu, QAction
 from PyQt5.QtGui import QIcon
-from PyQt5.QtCore import QTimer, QTime,    pyqtSignal, QObject
+from PyQt5.QtCore import pyqtSignal, QObject
 
 
 class TrayHolder(QObject):
-    """
-    Tray 包含：
-        1. 下次提醒的时间
-        2. 当前轮次
-        3. 立即短休（轮次+1）
-        4. 立即长休（轮次重置）
-        5. 重设定时
-        ---
-        6. 退出
-    """
-
     shortMention = pyqtSignal()
-    """短休 signal"""
-
     longMention = pyqtSignal()
-    """长休 signal"""
-
     resetTimer = pyqtSignal()
-    """重置定时 signal"""
-
-    quitApp = pyqtSignal()
-    """退出 signal"""
+    switchMode = pyqtSignal()
+    pausePopup = pyqtSignal(int)
+    openSettings = pyqtSignal()
 
     def __init__(self, icon: QIcon):
         super().__init__()
-        self.__tray_icon = QSystemTrayIcon(self)
-        self.__tray_icon.setIcon(icon)
-        self.__tray_icon.setVisible(True)
+        self._icon = icon
+        self._paused_icon = self._make_gray_icon(icon)
 
-        # 菜单和动作
-        self.__menu = QMenu()
-        self.__tray_icon.setContextMenu(self.__menu)
-        self.__next_mention_label = QAction("下一次提醒: --:--:--")
-        self.__menu.addAction(self.__next_mention_label)
+        self._tray_icon = QSystemTrayIcon(self)
+        self._tray_icon.setIcon(icon)
+        self._tray_icon.setVisible(True)
+        self._tray_icon.setToolTip('MGD-Helper')
 
-        self.__current_round_label = QAction("当前轮次：-/-")
-        self.__menu.addAction(self.__current_round_label)
+        self._menu = QMenu()
+        self._tray_icon.setContextMenu(self._menu)
 
-        self.__short_action = QAction("立即短休（轮次+1）")
-        self.__short_action.triggered.connect(self.shortMention)
-        self.__menu.addAction(self.__short_action)
+        self._next_mention_label = QAction('下一次提醒: --:--:--')
+        self._menu.addAction(self._next_mention_label)
 
-        self.__long_action = QAction("立即长休（轮次重置）")
-        self.__long_action.triggered.connect(self.longMention)
-        self.__menu.addAction(self.__long_action)
+        self._current_round_label = QAction('当前轮次：-/-')
+        self._menu.addAction(self._current_round_label)
 
-        self.__reset_action = QAction("重设定时")
-        self.__reset_action.triggered.connect(self.resetTimer)
-        self.__menu.addAction(self.__reset_action)
+        self._menu.addSeparator()
 
+        self._short_action = QAction('立即短休（轮次+1）')
+        self._short_action.triggered.connect(self.shortMention)
+        self._menu.addAction(self._short_action)
 
-        self.__quit_action = QAction("退出")
-        self.__quit_action.triggered.connect(self.quitApp)
-        self.__menu.addAction(self.__quit_action)
+        self._long_action = QAction('立即长休（轮次重置）')
+        self._long_action.triggered.connect(self.longMention)
+        self._menu.addAction(self._long_action)
 
-        self.__current_round = -1
-        self.__rounds = -1
-        self.__next_mention_time = '--:--:--'
+        self._reset_action = QAction('重设定时')
+        self._reset_action.triggered.connect(self.resetTimer)
+        self._menu.addAction(self._reset_action)
+
+        self._menu.addSeparator()
+
+        self._mode_action = QAction('模式：弹窗模式')
+        self._mode_action.triggered.connect(self.switchMode)
+        self._menu.addAction(self._mode_action)
+
+        self._pause_menu = self._menu.addMenu('暂停弹窗')
+        for mins in (15, 30, 60, 90):
+            action = QAction(f'{mins} 分钟')
+            action.triggered.connect(lambda checked, m=mins: self.pausePopup.emit(m))
+            self._pause_menu.addAction(action)
+
+        self._menu.addSeparator()
+
+        self._settings_action = QAction('设置...')
+        self._settings_action.triggered.connect(self.openSettings)
+        self._menu.addAction(self._settings_action)
+
+        self._current_round = -1
+        self._rounds = -1
+        self._next_mention_time_str = '--:--:--'
+        self._paused = False
 
     @property
     def current_round(self):
-        return self.__current_round
-    
+        return self._current_round
+
     @current_round.setter
     def current_round(self, x: int):
-        self.__current_round = x
-        self.__current_round_label.setText(f'当前轮次：{self.__current_round}/{self.rounds}')
-    
+        self._current_round = x
+        self._current_round_label.setText(f'当前轮次：{self._current_round}/{self._rounds}')
+
     @property
     def rounds(self):
-        return self.__rounds
+        return self._rounds
+
     @rounds.setter
     def rounds(self, x: int):
-        self.__rounds = x
-        self.__current_round_label.setText(f'当前轮次：{self.__current_round}/{self.rounds}')
+        self._rounds = x
+        self._current_round_label.setText(f'当前轮次：{self._current_round}/{self._rounds}')
 
     @property
     def next_mention_time(self):
-        return self.__next_mention_time
+        return self._next_mention_time_str
+
     @next_mention_time.setter
     def next_mention_time(self, x: datetime):
-        self.__next_mention_time = x.strftime('%H:%M:%S')
-        self.__next_mention_label.setText(f'下一次提醒: {self.__next_mention_time}')
+        self._next_mention_time_str = x.strftime('%H:%M:%S')
+        self._next_mention_label.setText(f'下一次提醒: {self._next_mention_time_str}')
 
+    def set_mode_label(self, mode: str):
+        label = '弹窗模式' if mode == 'popup' else '纯托盘通知'
+        self._mode_action.setText(f'模式：{label}')
 
+    def set_paused(self, paused: bool, until: datetime | None = None):
+        self._paused = paused
+        if paused and until:
+            self._tray_icon.setIcon(self._paused_icon)
+            self._tray_icon.setToolTip(f'MGD-Helper · 暂停中 · {until.strftime("%H:%M")} 恢复')
+        else:
+            self._tray_icon.setIcon(self._icon)
+            self._tray_icon.setToolTip('MGD-Helper')
 
-if __name__ == "__main__":
-    app = QApplication([])
-    holder = TrayHolder(QIcon(r'D:\DESKTOP\QQ图片20250717223011.jpg'))
-    update_timer = QTimer()
-    update_timer.setInterval(100)
-    @update_timer.timeout.connect
-    def _():
-        holder.next_mention_time = datetime.now()
-        holder.current_round += 1
-        holder.rounds += 2
-    
-    def go(msg: str):
-        def mygo():
-            # 使用弹窗
-            box = QMessageBox()
-            box.setText(msg)
-            box.exec() 
-        return mygo
-    holder.shortMention.connect(go('short'))
-    holder.longMention.connect(go('long'))
-    holder.resetTimer.connect(go('reset'))
-    update_timer.start()
-    holder.quitApp.connect(lambda: app.exit())
-    app.exec()
+    def show_notification(self, title: str, message: str, duration_ms: int = 5000):
+        self._tray_icon.showMessage(title, message, QSystemTrayIcon.Information, duration_ms)
+
+    @staticmethod
+    def _make_gray_icon(icon: QIcon) -> QIcon:
+        from PyQt5.QtGui import QPixmap, QPainter, QColor
+        pixmap = icon.pixmap(64, 64)
+        gray = QPixmap(pixmap.size())
+        gray.fill(QColor(0, 0, 0, 0))
+        painter = QPainter(gray)
+        painter.setOpacity(0.35)
+        painter.drawPixmap(0, 0, pixmap)
+        painter.end()
+        return QIcon(gray)

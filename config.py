@@ -1,41 +1,62 @@
 from pathlib import Path
 from pydantic import BaseModel
 
+CONFIG_DIR = Path.home() / '.config'
+CONFIG_PATH = CONFIG_DIR / 'mgd-helper.json'
+LOG_PATH = CONFIG_DIR / 'mgd-helper-log.jsonl'
+LEGACY_CONFIG = Path('config.json')
+
+
 class Config(BaseModel):
     mention_duration: int = 20
-    """ 提示间隔，按 20-20-20 原则，20分钟一提醒 """
-
-    long_mention_rounds: int = 3 
-    """ 每几轮短休来一次长休，默认 3 轮，即短-短-长-短-短-长 """
-
+    long_mention_rounds: int = 3
     delay_time: int = 5
-    """ 推迟时间，默认 5 分钟 """
-
     short_mention_time: int = 4
-    """ 短休时间，默认 4 分钟"""
-
     short_mention_msg: str = '该短休了！眺望并用力闭眼1分钟，冥想 3 分钟！'
-
     long_mention_time: int = 13
-    """ 长休时间，默认 13 分钟"""
-
     long_mention_msg: str = '该长休了，眺望并用力闭眼 3 分钟，冥想 10 分钟！'
-
-    delay_msg: str = '延迟 5 分钟显示'
-    delay_time: int = 5
-
-    choices: list[str] = ['不在电脑前', '画画', '纸笔画画', '学习', '刷视频', '玩游戏']
-
+    delay_msg: str = '推迟 5 分钟显示'
+    mode: str = 'popup'
+    popup_style: str = 'compact'
+    dingdong_enabled: bool = True
+    bgm_enabled: bool = False
+    alarm_enabled: bool = True
     debug: bool = False
 
-    muted: bool = False
 
-def get_config():
-    if Path('config.json').exists():
-        try: 
-            return Config.model_validate_json(Path('config.json').read_bytes())
-        except: 
+def _migrate_legacy() -> Config | None:
+    if not LEGACY_CONFIG.exists():
+        return None
+    try:
+        raw = LEGACY_CONFIG.read_bytes()
+        cfg = Config.model_validate_json(raw)
+        _save(cfg)
+        LEGACY_CONFIG.rename(LEGACY_CONFIG.with_suffix('.json.bak'))
+        return cfg
+    except Exception:
+        return None
+
+
+def _save(cfg: Config) -> None:
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    CONFIG_PATH.write_text(cfg.model_dump_json(indent=4), encoding='utf-8')
+
+
+def get_config() -> Config:
+    if CONFIG_PATH.exists():
+        try:
+            return Config.model_validate_json(CONFIG_PATH.read_bytes())
+        except Exception:
             pass
-    default_config = Config()
-    Path('config.json').write_text(default_config.model_dump_json(indent=4), encoding='utf-8')
-    return default_config
+
+    migrated = _migrate_legacy()
+    if migrated is not None:
+        return migrated
+
+    default = Config()
+    _save(default)
+    return default
+
+
+def save_config(cfg: Config) -> None:
+    _save(cfg)

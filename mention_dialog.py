@@ -1,213 +1,222 @@
 from datetime import datetime, timedelta
-from typing import Annotated, Literal, cast
-from PyQt5.QtCore import *
-from PyQt5.QtWidgets import *
-from PyQt5.QtGui import *
 from pydantic import BaseModel, Field
-from sympy import sec
+
+from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtWidgets import (
+    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QTextEdit,
+)
 
 from media_player import MyMediaPlayer
 
+
 class DialogParam(BaseModel):
-    choices: list[str] = Field([])
-
-    title: str
-
+    title: str = ''
     duration: int
-    """in seconds"""
-
     msg: str
-
     delay_msg: str = ''
     can_delay: bool = True
     debug: bool = False
+    popup_style: str = 'compact'
+
 
 class DialogResult(BaseModel):
-    action: Literal['DEBUG_CLOSE', 'DELAY', 'NORMAL']
-    action_content: str = ''
-    inflammation: int
-    open_time: datetime
-    close_time: datetime
-    
-class _DialogState(BaseModel):
-    state: Literal['INIT', 'RUNNING', 'DONE']
+    action: str = 'NORMAL'
+    note: str = ''
     open_time: datetime = Field(default_factory=datetime.now)
     close_time: datetime = Field(default_factory=datetime.now)
 
 
 class MentionDialog(QDialog):
-    """
-    定时的弹窗，仅包含展示、自动关闭逻辑，不包含任何其他副作用，保存记录啥的，不是这个模块的任务
-    """
-
     def __init__(self, config: DialogParam, media_player: MyMediaPlayer):
         super().__init__()
-        # 设置该 widget 及其所有子控件的字体大小
-        self.setStyleSheet("""
-            * {
-                font-size: 32px;  /* 统一字体大小 */
-            }
-            QRadioButton::indicator {
-                width: 32px;      /* 圆形标记宽度 */
-                height: 32px;     /* 圆形标记高度 */
-            }
+        self._config = config
+        self._media_player = media_player
+        self._open_time = datetime.now()
+        self._timeout_reached = False
+
+        is_compact = config.popup_style == 'compact'
+        if is_compact:
+            self.setMinimumSize(580, 460)
+            base_font_size = 22
+        else:
+            self.setMinimumSize(800, 600)
+            base_font_size = 36
+
+        self.setStyleSheet(f"""
+            MentionDialog {{
+                background-color: #1e1e2e;
+                color: #cdd6f4;
+            }}
+            QLabel {{
+                color: #cdd6f4;
+                font-size: {base_font_size}px;
+            }}
+            QLabel#msgLabel {{
+                font-size: {base_font_size + 3}px;
+                font-weight: bold;
+            }}
+            QLabel#timerLabel {{
+                font-size: {base_font_size}px;
+                font-family: 'Consolas', 'Microsoft YaHei UI';
+            }}
+            QTextEdit {{
+                background-color: #313244;
+                color: #cdd6f4;
+                border: 1px solid #45475a;
+                border-radius: 6px;
+                padding: 10px;
+                font-size: {base_font_size - 1}px;
+            }}
+            QPushButton {{
+                background-color: #45475a;
+                color: #cdd6f4;
+                border: none;
+                border-radius: 6px;
+                padding: 10px 24px;
+                font-size: {base_font_size - 1}px;
+            }}
+            QPushButton:hover {{
+                background-color: #585b70;
+            }}
+            QPushButton:disabled {{
+                background-color: #313244;
+                color: #585b70;
+            }}
+            QPushButton#closeBtn {{
+                background-color: #a6e3a1;
+                color: #1e1e2e;
+                font-weight: bold;
+                font-size: {base_font_size + 1}px;
+            }}
+            QPushButton#closeBtn:hover {{
+                background-color: #94e2d5;
+            }}
+            QPushButton#closeBtn:disabled {{
+                background-color: #313244;
+                color: #585b70;
+            }}
         """)
 
-        self.__config = config
-        self.__state = _DialogState(state='INIT')
-
-        self.setWindowTitle(config.title)
-        self.setMinimumSize(800, 600)
-
-        # 设置窗口标志
+        self.setWindowTitle(config.title or '护眼提醒')
         self.setWindowFlags(
-            Qt.Window |  # 作为窗口
-            Qt.WindowStaysOnTopHint   # 始终置顶
-            | Qt.CustomizeWindowHint  # 自定义窗口提示，允许我们移除关闭按钮
+            Qt.Window
+            | Qt.WindowStaysOnTopHint
+            | Qt.CustomizeWindowHint
         )
-        
-        # 移除关闭按钮
         self.setWindowFlags(self.windowFlags() & ~Qt.WindowCloseButtonHint)
 
+        self._build_ui(base_font_size)
+
+        self._timer = QTimer(self)
+        self._timer.setInterval(200)
+        self._timer.timeout.connect(self._on_tick)
+        self._timer.start()
+
+    def _build_ui(self, font_size: int):
         layout = QVBoxLayout()
-        layout.setAlignment(Qt.AlignCenter)
+        layout.setContentsMargins(24, 20, 24, 20)
+        layout.setSpacing(14)
         self.setLayout(layout)
-        layout.addStretch(1)
 
-        ## choices
-        layout.addWidget(QLabel('我正在：', self))
-        choice_button_group, choice_btns = self.__choice_widgets()
-        def selected_choice_getter() -> str:
-            if choice_button_group.checkedId() == -1:
-                return ''
-            return self.__config.choices[choice_button_group.checkedId() - 1]
-        self.__selected_choice_getter = selected_choice_getter
-        choice_btns_widget = QWidget(self)
-        choice_btn_layout = QHBoxLayout(choice_btns_widget)
-        [choice_btn_layout.addWidget(btn) for btn in choice_btns]
-        layout.addWidget(choice_btns_widget)
+        msg_label = QLabel(self._config.msg, self)
+        msg_label.setObjectName('msgLabel')
+        msg_label.setWordWrap(True)
+        layout.addWidget(msg_label)
 
-        ## 眼睛炎症程度
-        layout.addWidget(QLabel("眼睛炎症程度：", self))
-        inflammation_button_group, inflammation_btns = self.__inflammation_widgets()
-        def selected_inflammation_getter():
-            return inflammation_button_group.checkedId()
-        self.__selected_inflammation_getter = selected_inflammation_getter
-        inflammation_btns_widget = QWidget(self)
-        inflammation_btn_layout = QHBoxLayout(inflammation_btns_widget)
-        [inflammation_btn_layout.addWidget(btn) for btn in inflammation_btns]
-        layout.addWidget(inflammation_btns_widget)
+        self._timer_label = QLabel(self)
+        self._timer_label.setObjectName('timerLabel')
+        layout.addWidget(self._timer_label)
 
+        self._note_edit = QTextEdit(self)
+        self._note_edit.setPlaceholderText('随便写点感想...（可选）')
+        self._note_edit.setMaximumHeight(100 if self._config.popup_style == 'compact' else 160)
+        layout.addWidget(self._note_edit)
 
-        ## MSG AND TIMER_MSG
-        layout.addWidget(QLabel(config.msg, self))
-        self.__timer_label = QLabel(self)
-        layout.addWidget(self.__timer_label)
-        
-        ## DELAY_BUTTON
-        if config.can_delay:
-            delay_button = QPushButton(config.delay_msg or 'DELAY ME', self)
-            delay_button.clicked.connect(self.__delay_close)
-            self.layout().addWidget(delay_button)
+        btn_layout = QHBoxLayout()
+        btn_layout.setSpacing(12)
 
-        ## DEBUG_CLOSE_BUTTON
-        if config.debug:
-            debug_close_button = QPushButton(self)
-            debug_close_button.setText('DEBUG CLOSE')
-            debug_close_button.clicked.connect(self.__debug_close)
-            layout.addWidget(debug_close_button)
+        if self._config.can_delay:
+            self._delay_btn = QPushButton(self._config.delay_msg or '推迟', self)
+            self._delay_btn.clicked.connect(self._on_delay)
+            btn_layout.addWidget(self._delay_btn)
 
-        # self.__close_button = QPushButton(self)
-        # self.__close_button.setText("完成")
-        # self.__close_button.setEnabled(False)
-        # self.__close_button.clicked.connect(lambda: self.done(0))
-        # layout.addWidget(self.__close_button)
+        btn_layout.addStretch()
 
-        layout.addStretch(1)
-        self.__timer = self.__loop_timer()
-        self.__timer.start()
+        self._close_btn = QPushButton('关闭（请等待...）', self)
+        self._close_btn.setObjectName('closeBtn')
+        self._close_btn.setEnabled(False)
+        self._close_btn.clicked.connect(self._on_close)
+        btn_layout.addWidget(self._close_btn)
 
-        self.__media_player = media_player
-        self.__first_timeout = True
+        if self._config.debug:
+            debug_btn = QPushButton('DEBUG CLOSE', self)
+            debug_btn.clicked.connect(self._on_debug_close)
+            btn_layout.addWidget(debug_btn)
 
-    def __choice_widgets(self):
-        button_group = QButtonGroup(self)
+        layout.addLayout(btn_layout)
 
-        btns = [QRadioButton(i, self) for i in self.__config.choices]
-        for i, v in enumerate(btns):
-            button_group.addButton(v, i + 1)
-        return button_group, btns
+    def _on_tick(self):
+        expect_close = self._open_time + timedelta(seconds=self._config.duration)
+        remain = expect_close - datetime.now()
+        seconds = remain.total_seconds()
 
-    def __inflammation_widgets(self):
-        button_group = QButtonGroup(self)
+        if seconds > 0:
+            m = int(seconds // 60)
+            s = int(seconds % 60)
+            self._timer_label.setText(f'关闭时间剩余：{m}:{s:02d}（至 {expect_close:%H:%M}）')
+            return
 
-        btns = [QRadioButton(f'{i}', self) for i in range(1, 6)]
-        for i, v in enumerate(btns):
-            button_group.addButton(v, i + 1)
-        return button_group, btns
+        self._timer_label.setText('时间到！可以关闭了')
+        self._timer.stop()
 
-    def __loop_timer(self) -> QTimer:
-        timer = QTimer(self)
-        timer.setInterval(100)
-        @timer.timeout.connect
-        def _():
-            if not self.__state.state == 'RUNNING':
-                return
-            expect_close_time = self.__state.open_time + timedelta(seconds=self.__config.duration)
-            last_delta = expect_close_time - datetime.now()
-            self.__timer_label.setText(f'关闭时间剩余：{last_delta.total_seconds():.1f} s（至 {expect_close_time:%H:%M:%S} ）')
-            if last_delta.total_seconds() < 0:
-                self.__after_timeout()
-        return timer
-    
-    def __after_timeout(self):
-        """will repeat execute after timeout"""
-        if self.__first_timeout:
-            self.__first_timeout = False
-            self.__media_player.play_alarm()
+        if not self._timeout_reached:
+            self._timeout_reached = True
+            self._media_player.play_alarm()
 
-        self.__media_player.stop_clock()
-        if self.__selected_choice_getter() and self.__selected_inflammation_getter() != -1:
-            self.done(0)
+        self._close_btn.setText('关闭')
+        self._close_btn.setEnabled(True)
 
-    def __debug_close(self):
-        self.done(1)
-    
-    def __delay_close(self):
+    def _on_delay(self):
+        self._media_player.stop_clock()
         self.done(2)
-    
-    def start_mentioning(self):
-        self.__state.open_time = datetime.now()
-        self.__state.state = 'RUNNING'
-        self.__media_player.play_dingdong()
-        self.__media_player.start_clock()
-        code = self.exec()
-        self.__media_player.stop_clock() # 点击delay 时 __after_timeout 不会被执行到
-        self.__state.state = 'DONE'
-        self.__state.close_time = datetime.now()
-        if code == 1:
-            return DialogResult(action='DEBUG_CLOSE', open_time=self.__state.open_time, close_time=self.__state.close_time, inflammation=self.__selected_inflammation_getter() )
-        if code == 2:
-            return DialogResult(action='DELAY', open_time=self.__state.open_time, close_time=self.__state.close_time, inflammation=self.__selected_inflammation_getter())
-        if choice := self.__selected_choice_getter():
-            return DialogResult(action='NORMAL', action_content=choice, open_time=self.__state.open_time, close_time=self.__state.close_time, inflammation=self.__selected_inflammation_getter() )
-        raise NotImplementedError('Impossible')
-        # return DialogResult(action='LEAVING', open_time=self.__state.open_time, close_time=self.__state.close_time)
 
-    # 重写closeEvent方法，禁用Alt+F4
+    def _on_close(self):
+        self._media_player.stop_clock()
+        self.done(0)
+
+    def _on_debug_close(self):
+        self._media_player.stop_clock()
+        self.done(1)
+
+    def start_mentioning(self) -> DialogResult:
+        self._open_time = datetime.now()
+        self._media_player.play_dingdong()
+        self._media_player.start_clock()
+
+        code = self.exec()
+        self._timer.stop()
+        self._media_player.stop_clock()
+
+        result = DialogResult(
+            open_time=self._open_time,
+            close_time=datetime.now(),
+            note=self._note_edit.toPlainText().strip(),
+        )
+
+        if code == 1:
+            result.action = 'DEBUG_CLOSE'
+        elif code == 2:
+            result.action = 'DELAY'
+        else:
+            result.action = 'NORMAL'
+
+        return result
+
     def closeEvent(self, event):
-        event.ignore()  # 忽略关闭事件
-    
-    # 可选：禁用Esc键关闭
+        event.ignore()
+
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_Escape:
             event.ignore()
         else:
             super().keyPressEvent(event)
-
-if __name__ == '__main__':
-    app = QApplication([])
-    player = MyMediaPlayer()
-    dialog = MentionDialog(DialogParam(title='title',duration=5, msg='但该休息了！', debug=True, choices=['LEAVING', '画画', '健身', '娱乐', '学习']), player)
-    print(dialog.start_mentioning())
-    

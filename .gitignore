@@ -1,5 +1,7 @@
 config.json
+config.json.bak
 log.jsonl
+mgd-helper-log.jsonl
 .vscode
 
 # Byte-compiled / optimized / DLL files

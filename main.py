@@ -1,121 +1,197 @@
 from datetime import datetime, timedelta
 from pathlib import Path
-from pydantic import BaseModel
-from PyQt5.QtCore import *
-from PyQt5.QtWidgets import *
-from PyQt5.QtGui import *
 
-from config import Config, get_config
+from pydantic import BaseModel
+from PyQt5.QtCore import QTimer
+from PyQt5.QtWidgets import QApplication
+from PyQt5.QtGui import QIcon
+
+from config import Config, get_config, save_config, LOG_PATH
 from media_player import MyMediaPlayer
 from mention_dialog import DialogParam, DialogResult, MentionDialog
 from tray_holder import TrayHolder
+from settings_dialog import SettingsDialog
 
-class State(BaseModel):
-    is_running: bool
-    is_showing_dialog: bool
-    next_mention_time: datetime
-    can_delay: bool
-    current_round: int
+
+class AppState(BaseModel):
+    is_running: bool = False
+    is_showing_dialog: bool = False
+    next_mention_time: datetime | None = None
+    can_delay: bool = True
+    current_round: int = 1
+    paused_until: datetime | None = None
+
 
 class Main:
     def __init__(self, config: Config, tray: TrayHolder, media_player: MyMediaPlayer) -> None:
-        self.__config = config
-        self.__state = State(
-            is_running=False,
-            is_showing_dialog=False,
-            next_mention_time=self.__calculate_next_mention_time(),
-            can_delay=True,
-            current_round=1
-        )
-        self.__media_player = media_player
-        self.__media_player.muted = self.__config.muted
-        
-        self.__timer = QTimer()
-        self.__timer.setInterval(1000)
-        self.__timer.timeout.connect(self.__loop)
-        self.__tray_holder = tray
-        self.__init_tray(tray)
-    
-    def __calculate_next_mention_time(self):
-        return datetime.now() + timedelta(minutes=self.__config.mention_duration)
+        self._config = config
+        self._state = AppState()
+        self._tray = tray
+        self._media_player = media_player
 
-    def __init_tray(self, tray: TrayHolder):
-        @tray.shortMention.connect
-        def _():
-            self.__state.can_delay = False
-            self.__trigger_dialog(False)
-        @tray.longMention.connect
-        def _():
-            self.__state.can_delay = False
-            self.__trigger_dialog(True)
-        @tray.resetTimer.connect
-        def _():
-            self.__state.next_mention_time = self.__calculate_next_mention_time()
-        @tray.quitApp.connect
-        def _():
-            if ins := QApplication.instance():
-                ins.exit(0)
+        self._apply_audio_config()
+        self._tray.set_mode_label(self._config.mode)
 
-    def __loop(self):
-        if not self.__state.is_running:
-            return
-        self.__update_tray()
-        if datetime.now() < self.__state.next_mention_time:
-            return
-        self.__trigger_dialog(self.__state.current_round >= self.__config.long_mention_rounds)
+        self._timer = QTimer()
+        self._timer.setInterval(1000)
+        self._timer.timeout.connect(self._loop)
 
-    def __trigger_dialog(self, long_mention: bool):
-        if self.__state.is_showing_dialog:
+        self._init_tray_signals()
+
+    def _apply_audio_config(self):
+        self._media_player.dingdong_enabled = self._config.dingdong_enabled
+        self._media_player.bgm_enabled = self._config.bgm_enabled
+        self._media_player.alarm_enabled = self._config.alarm_enabled
+        self._media_player.stop_clock()
+
+    def _init_tray_signals(self):
+        t = self._tray
+
+        @t.shortMention.connect
+        def _():
+            self._state.can_delay = False
+            self._do_mention(False)
+
+        @t.longMention.connect
+        def _():
+            self._state.can_delay = False
+            self._do_mention(True)
+
+        @t.resetTimer.connect
+        def _():
+            self._state.next_mention_time = self._next_mention_time()
+
+        @t.switchMode.connect
+        def _():
+            self._config.mode = 'tray_only' if self._config.mode == 'popup' else 'popup'
+            save_config(self._config)
+            self._tray.set_mode_label(self._config.mode)
+
+        @t.pausePopup.connect
+        def _(minutes: int):
+            self._state.paused_until = datetime.now() + timedelta(minutes=minutes)
+            self._tray.set_paused(True, self._state.paused_until)
+
+        @t.openSettings.connect
+        def _():
+            self._open_settings()
+
+    def _open_settings(self):
+        dlg = SettingsDialog(self._config)
+        if dlg.exec():
+            result = dlg.get_result()
+            if result:
+                self._config = result
+                save_config(self._config)
+                self._apply_audio_config()
+                self._tray.set_mode_label(self._config.mode)
+
+    def _loop(self):
+        if not self._state.is_running:
             return
+
+        now = datetime.now()
+
+        if self._state.paused_until:
+            if now < self._state.paused_until:
+                self._tray.set_paused(True, self._state.paused_until)
+                return
+            self._state.paused_until = None
+            self._tray.set_paused(False)
+
+        self._update_tray()
+
+        if self._state.next_mention_time and now < self._state.next_mention_time:
+            return
+
+        self._do_mention(self._state.current_round >= self._config.long_mention_rounds)
+
+    def _do_mention(self, long_mention: bool):
+        if self._config.mode == 'tray_only':
+            self._do_tray_notification(long_mention)
+            return
+
+        if self._state.is_showing_dialog:
+            return
+
+        is_long = long_mention
+        duration = 60 * (self._config.long_mention_time if is_long else self._config.short_mention_time)
+        msg = self._config.long_mention_msg if is_long else self._config.short_mention_msg
+
         dialog = MentionDialog(DialogParam(
-            choices=self.__config.choices,
             title='',
-            duration=60 * (self.__config.long_mention_time if long_mention else self.__config.short_mention_time),
-            msg=self.__config.long_mention_msg if long_mention else self.__config.short_mention_msg,
-            can_delay=self.__state.can_delay,
-            delay_msg=self.__config.delay_msg,
-            debug=self.__config.debug,
-        ), self.__media_player)
-        self.__state.is_showing_dialog = True
+            duration=duration,
+            msg=msg,
+            can_delay=self._state.can_delay,
+            delay_msg=self._config.delay_msg,
+            debug=self._config.debug,
+            popup_style=self._config.popup_style,
+        ), self._media_player)
 
+        self._state.is_showing_dialog = True
         response = dialog.start_mentioning()
+        self._state.is_showing_dialog = False
 
-        self.__state.is_showing_dialog = False
-        self.__update_state(response, long_mention)
-        self.__append_log(response)
+        self._advance_state(response, long_mention)
+        self._append_log(response)
 
-    def __update_state(self, response: DialogResult, long_mention: bool):
+    def _do_tray_notification(self, long_mention: bool):
+        msg = self._config.long_mention_msg if long_mention else self._config.short_mention_msg
+        duration_ms = 10000
+        self._tray.show_notification('护眼提醒', msg, duration_ms)
+
+        response = DialogResult(
+            action='NORMAL',
+            note='',
+            open_time=datetime.now(),
+            close_time=datetime.now(),
+        )
+        self._advance_state(response, long_mention)
+        self._append_log(response)
+
+    def _advance_state(self, response: DialogResult, long_mention: bool):
         if response.action == 'DELAY':
-            self.__state.next_mention_time = datetime.now() + timedelta(minutes=self.__config.delay_time)
-            self.__state.can_delay = False # 禁止连续 delay
+            self._state.next_mention_time = datetime.now() + timedelta(minutes=self._config.delay_time)
+            self._state.can_delay = False
             return
 
-        self.__state.is_showing_dialog = False
-        self.__state.can_delay = True
-        self.__state.next_mention_time = self.__calculate_next_mention_time()
-        self.__state.current_round += 1
+        self._state.can_delay = True
+        self._state.next_mention_time = self._next_mention_time()
+        self._state.current_round += 1
         if long_mention:
-            self.__state.current_round = 1
-        
-    def __update_tray(self):
-        self.__tray_holder.current_round = self.__state.current_round
-        self.__tray_holder.rounds = self.__config.long_mention_rounds
-        self.__tray_holder.next_mention_time = self.__state.next_mention_time
+            self._state.current_round = 1
 
-    def __append_log(self, response: DialogResult):
-        with Path('log.jsonl').open('at', encoding='utf-8') as f:
+    def _next_mention_time(self) -> datetime:
+        return datetime.now() + timedelta(minutes=self._config.mention_duration)
+
+    def _update_tray(self):
+        self._tray.current_round = self._state.current_round
+        self._tray.rounds = self._config.long_mention_rounds
+        if self._state.next_mention_time:
+            self._tray.next_mention_time = self._state.next_mention_time
+
+    def _append_log(self, response: DialogResult):
+        LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with LOG_PATH.open('at', encoding='utf-8') as f:
             f.write(response.model_dump_json())
             f.write('\n')
 
     def start(self):
-        self.__state.is_running = True
-        self.__state.next_mention_time = self.__calculate_next_mention_time()
-        self.__timer.start()
+        self._state.is_running = True
+        self._state.next_mention_time = self._next_mention_time()
+        self._timer.start()
 
 
 if __name__ == '__main__':
     app = QApplication([])
     app.setQuitOnLastWindowClosed(False)
-    main = Main(get_config(), TrayHolder(QIcon(str((Path(__file__).parent/'asset'/'icon.ico')))), MyMediaPlayer())
+
+    config = get_config()
+
+    icon_path = Path(__file__).parent / 'asset' / 'icon.ico'
+    tray = TrayHolder(QIcon(str(icon_path)))
+    player = MyMediaPlayer()
+
+    main = Main(config, tray, player)
     main.start()
     app.exec()
