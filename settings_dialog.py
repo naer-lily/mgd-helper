@@ -197,6 +197,7 @@ class SettingsDialog(QDialog):
 
         self._mode_combo = QComboBox()
         self._mode_combo.addItem('弹窗模式', 'popup')
+        self._mode_combo.addItem('角落浮窗', 'corner')
         self._mode_combo.addItem('纯托盘通知', 'tray_only')
         idx = self._mode_combo.findData(self._config.mode)
         if idx >= 0:

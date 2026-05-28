@@ -4,7 +4,9 @@ from pydantic import BaseModel, Field
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QTextEdit,
+    QApplication,
 )
+from PyQt5.QtGui import QFont
 
 from media_player import MyMediaPlayer
 
@@ -33,30 +35,55 @@ class MentionDialog(QDialog):
         self._media_player = media_player
         self._open_time = datetime.now()
         self._timeout_reached = False
+        self._is_corner = config.popup_style == 'corner'
 
-        is_compact = config.popup_style == 'compact'
-        if is_compact:
+        if self._is_corner:
+            self.setMinimumSize(440, 180)
+            base_font_size = 17
+        elif config.popup_style == 'compact':
             self.setMinimumSize(580, 460)
             base_font_size = 22
         else:
             self.setMinimumSize(800, 600)
             base_font_size = 36
 
-        self.setStyleSheet(f"""
+        self._base_font_size = base_font_size
+
+        # 窗口标题：corner 模式下为空，避免暴露内容
+        window_title = '' if self._is_corner else (config.title or '护眼提醒')
+        self.setWindowTitle(window_title)
+
+        self.setStyleSheet(self._make_stylesheet(base_font_size))
+
+        flags = Qt.Window | Qt.WindowStaysOnTopHint | Qt.CustomizeWindowHint
+        self.setWindowFlags(flags)
+        self.setWindowFlags(self.windowFlags() & ~Qt.WindowCloseButtonHint)
+
+        if self._is_corner:
+            self._build_corner_ui()
+        else:
+            self._build_ui()
+
+        self._timer = QTimer(self)
+        self._timer.setInterval(200)
+        self._timer.timeout.connect(self._on_tick)
+        self._timer.start()
+
+    def _make_stylesheet(self, base: int) -> str:
+        return f"""
             MentionDialog {{
                 background-color: #1e1e2e;
                 color: #cdd6f4;
             }}
             QLabel {{
                 color: #cdd6f4;
-                font-size: {base_font_size}px;
+                font-size: {base}px;
             }}
             QLabel#msgLabel {{
-                font-size: {base_font_size + 3}px;
+                font-size: {base + 2}px;
                 font-weight: bold;
             }}
             QLabel#timerLabel {{
-                font-size: {base_font_size}px;
                 font-family: 'Consolas', 'Microsoft YaHei UI';
             }}
             QTextEdit {{
@@ -65,7 +92,7 @@ class MentionDialog(QDialog):
                 border: 1px solid #45475a;
                 border-radius: 6px;
                 padding: 10px;
-                font-size: {base_font_size - 1}px;
+                font-size: {base - 1}px;
             }}
             QPushButton {{
                 background-color: #45475a;
@@ -73,7 +100,7 @@ class MentionDialog(QDialog):
                 border: none;
                 border-radius: 6px;
                 padding: 10px 24px;
-                font-size: {base_font_size - 1}px;
+                font-size: {base - 1}px;
             }}
             QPushButton:hover {{
                 background-color: #585b70;
@@ -86,7 +113,7 @@ class MentionDialog(QDialog):
                 background-color: #a6e3a1;
                 color: #1e1e2e;
                 font-weight: bold;
-                font-size: {base_font_size + 1}px;
+                font-size: {base + 1}px;
             }}
             QPushButton#closeBtn:hover {{
                 background-color: #94e2d5;
@@ -95,24 +122,9 @@ class MentionDialog(QDialog):
                 background-color: #313244;
                 color: #585b70;
             }}
-        """)
+        """
 
-        self.setWindowTitle(config.title or '护眼提醒')
-        self.setWindowFlags(
-            Qt.Window
-            | Qt.WindowStaysOnTopHint
-            | Qt.CustomizeWindowHint
-        )
-        self.setWindowFlags(self.windowFlags() & ~Qt.WindowCloseButtonHint)
-
-        self._build_ui(base_font_size)
-
-        self._timer = QTimer(self)
-        self._timer.setInterval(200)
-        self._timer.timeout.connect(self._on_tick)
-        self._timer.start()
-
-    def _build_ui(self, font_size: int):
+    def _build_ui(self):
         layout = QVBoxLayout()
         layout.setContentsMargins(24, 20, 24, 20)
         layout.setSpacing(14)
@@ -129,9 +141,57 @@ class MentionDialog(QDialog):
 
         self._note_edit = QTextEdit(self)
         self._note_edit.setPlaceholderText('随便写点感想...（可选）')
-        self._note_edit.setMaximumHeight(100 if self._config.popup_style == 'compact' else 160)
+        max_h = 160 if self._config.popup_style == 'standard' else 100
+        self._note_edit.setMaximumHeight(max_h)
         layout.addWidget(self._note_edit)
 
+        layout.addLayout(self._make_button_row())
+
+    def _build_corner_ui(self):
+        layout = QVBoxLayout()
+        layout.setContentsMargins(16, 12, 16, 12)
+        layout.setSpacing(8)
+        self.setLayout(layout)
+
+        msg_label = QLabel(self._config.msg, self)
+        msg_label.setObjectName('msgLabel')
+        msg_label.setWordWrap(True)
+        layout.addWidget(msg_label)
+
+        timer_and_btn = QHBoxLayout()
+        timer_and_btn.setSpacing(8)
+
+        self._timer_label = QLabel(self)
+        self._timer_label.setObjectName('timerLabel')
+        timer_and_btn.addWidget(self._timer_label, 1)
+
+        if self._config.can_delay:
+            self._delay_btn = QPushButton(self._config.delay_msg or '推迟', self)
+            self._delay_btn.setMaximumWidth(80)
+            self._delay_btn.clicked.connect(self._on_delay)
+            timer_and_btn.addWidget(self._delay_btn)
+
+        self._close_btn = QPushButton('等待...', self)
+        self._close_btn.setObjectName('closeBtn')
+        self._close_btn.setMaximumWidth(80)
+        self._close_btn.setEnabled(False)
+        self._close_btn.clicked.connect(self._on_close)
+        timer_and_btn.addWidget(self._close_btn)
+
+        if self._config.debug:
+            debug_btn = QPushButton('X', self)
+            debug_btn.setMaximumWidth(40)
+            debug_btn.clicked.connect(self._on_debug_close)
+            timer_and_btn.addWidget(debug_btn)
+
+        layout.addLayout(timer_and_btn)
+
+        self._note_edit = QTextEdit(self)
+        self._note_edit.setPlaceholderText('感想...（可选）')
+        self._note_edit.setMaximumHeight(50)
+        layout.addWidget(self._note_edit)
+
+    def _make_button_row(self):
         btn_layout = QHBoxLayout()
         btn_layout.setSpacing(12)
 
@@ -153,7 +213,7 @@ class MentionDialog(QDialog):
             debug_btn.clicked.connect(self._on_debug_close)
             btn_layout.addWidget(debug_btn)
 
-        layout.addLayout(btn_layout)
+        return btn_layout
 
     def _on_tick(self):
         expect_close = self._open_time + timedelta(seconds=self._config.duration)
@@ -163,10 +223,10 @@ class MentionDialog(QDialog):
         if seconds > 0:
             m = int(seconds // 60)
             s = int(seconds % 60)
-            self._timer_label.setText(f'关闭时间剩余：{m}:{s:02d}（至 {expect_close:%H:%M}）')
+            self._timer_label.setText(f'剩余 {m}:{s:02d}（至 {expect_close:%H:%M}）')
             return
 
-        self._timer_label.setText('时间到！可以关闭了')
+        self._timer_label.setText('时间到')
         self._timer.stop()
 
         if not self._timeout_reached:
@@ -211,6 +271,18 @@ class MentionDialog(QDialog):
             result.action = 'NORMAL'
 
         return result
+
+    def showEvent(self, event):
+        if self._is_corner:
+            self._position_corner()
+        super().showEvent(event)
+
+    def _position_corner(self):
+        screen = QApplication.primaryScreen().availableGeometry()
+        self.move(
+            screen.right() - self.width() - 20,
+            screen.bottom() - self.height() - 20,
+        )
 
     def closeEvent(self, event):
         event.ignore()

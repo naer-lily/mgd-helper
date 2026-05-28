@@ -63,7 +63,9 @@ class Main:
 
         @t.switchMode.connect
         def _():
-            self._config.mode = 'tray_only' if self._config.mode == 'popup' else 'popup'
+            modes = ['popup', 'corner', 'tray_only']
+            idx = modes.index(self._config.mode) if self._config.mode in modes else 0
+            self._config.mode = modes[(idx + 1) % len(modes)]
             save_config(self._config)
             self._tray.set_mode_label(self._config.mode)
 
@@ -125,7 +127,7 @@ class Main:
             can_delay=self._state.can_delay,
             delay_msg=self._config.delay_msg,
             debug=self._config.debug,
-            popup_style=self._config.popup_style,
+            popup_style='corner' if self._config.mode == 'corner' else self._config.popup_style,
         ), self._media_player)
 
         self._state.is_showing_dialog = True

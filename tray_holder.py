@@ -96,8 +96,8 @@ class TrayHolder(QObject):
         self._next_mention_label.setText(f'下一次提醒: {self._next_mention_time_str}')
 
     def set_mode_label(self, mode: str):
-        label = '弹窗模式' if mode == 'popup' else '纯托盘通知'
-        self._mode_action.setText(f'模式：{label}')
+        labels = {'popup': '弹窗模式', 'corner': '角落浮窗', 'tray_only': '纯托盘通知'}
+        self._mode_action.setText(f"模式：{labels.get(mode, mode)}")
 
     def set_paused(self, paused: bool, until: datetime | None = None):
         self._paused = paused
